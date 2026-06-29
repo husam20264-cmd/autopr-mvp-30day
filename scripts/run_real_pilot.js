@@ -157,10 +157,10 @@ async function main() {
     }
   }
 
-  // ── Phase 3: Simulate PR outcomes for collected events ──
+  // ── Phase 3: Inject Truth Events ──
   console.log(`\n${bold}Phase 3: Inject Truth Events${reset}`);
 
-  // Use existing patterns' confidence distribution to simulate realistic outcomes
+  // Load existing pattern distribution for diversity planning
   const patternStats = db.prepare(`
     SELECT AVG(confidence) AS avg_conf, SUM(times_accepted) AS total_accepted,
            SUM(times_accepted + times_rejected) AS total_decisions
@@ -170,29 +170,113 @@ async function main() {
     ? patternStats.total_accepted / patternStats.total_decisions
     : 0.7;
 
+  // ── Distribution stress layer: controlled chaos for entropy injection ──
+  // Breaks single-mode lock by forcing fix-type diversity, rejections,
+  // counterfactuals, and distribution shifts.
+
+  const FIX_TYPES = ['trivial_bug', 'lint', 'dependency', 'ci_failure'];
+  const CHAOS_RATE = 0.25; // 25% of events are forced chaos (rejection / low-trust / counterfactual)
+  const COUNTERFACTUAL_RATE = 0.10; // 10% of events revisit a prior fix type with different outcome
+
+  // Sample existing repos from truth_events for counterfactuals
+  const existingRepos = db.prepare(`SELECT DISTINCT repo FROM truth_events`).all().map(r => r.repo);
+
+  // Determine target distribution for this run (varies per run to create regime shifts)
+  const runDistribution = (() => {
+    const runNumber = (db.prepare(`SELECT COUNT(*) AS n FROM truth_calibration WHERE metric = 'baseline:v1_snapshot'`).get().n || 0) + 1;
+    // Cycle distribution pattern to prevent mode locking
+    const cycles = [
+      [0.5, 0.2, 0.2, 0.1], // balanced
+      [0.3, 0.3, 0.2, 0.2], // even
+      [0.6, 0.1, 0.1, 0.2], // bug-heavy
+      [0.2, 0.3, 0.3, 0.2], // lint + dependency heavy
+    ];
+    return cycles[(runNumber - 1) % cycles.length];
+  })();
+
   let truthInjected = 0;
+  let chaosEvents = 0;
   const pendingEvents = db.prepare(`SELECT * FROM events WHERE status = 'pending'`).all();
-  for (const event of pendingEvents.slice(0, 15)) {
+  const eventsToProcess = pendingEvents.slice(0, 15);
+
+  // Build per-event fix type assignment that follows the target distribution
+  const eventFixTypes = [];
+  for (let i = 0; i < eventsToProcess.length; i++) {
+    // Sample from target distribution
+    const r = Math.random();
+    let cum = 0;
+    let chosen = FIX_TYPES[0];
+    for (let j = 0; j < FIX_TYPES.length; j++) {
+      cum += runDistribution[j];
+      if (r <= cum) { chosen = FIX_TYPES[j]; break; }
+    }
+    eventFixTypes.push(chosen);
+  }
+
+  for (let idx = 0; idx < eventsToProcess.length; idx++) {
+    const event = eventsToProcess[idx];
     const payload = JSON.parse(event.payload);
     const repoName = payload.repository?.full_name || 'unknown/repo';
-    const fixType = event.event_type === 'check_run' ? 'ci_failure' : 'trivial_bug';
+    const fixType = eventFixTypes[idx];
+    const isChaos = Math.random() < CHAOS_RATE;
+    const isCounterfactual = !isChaos && Math.random() < COUNTERFACTUAL_RATE && existingRepos.length > 0;
 
-    // Determine outcome probabilistically based on pattern confidence
-    const confBase = patternStats.avg_conf || 0.7;
-    const outcome = Math.random() < confBase ? 'merged' : 'closed';
+    // Determine outcome
+    let outcome, trustScore, confBase;
+    if (isChaos) {
+      // Chaos: force rejection or low-trust event regardless of pattern confidence
+      const chaosMode = Math.random();
+      if (chaosMode < 0.4) {
+        outcome = 'closed';
+        confBase = 0.7 + Math.random() * 0.25; // high confidence but still closed
+        trustScore = 0.6 + Math.random() * 0.3;
+      } else if (chaosMode < 0.7) {
+        outcome = 'merged';
+        confBase = 0.3 + Math.random() * 0.3; // low confidence but still merged
+        trustScore = 0.3 + Math.random() * 0.3;
+      } else {
+        outcome = Math.random() < 0.5 ? 'merged' : 'closed';
+        confBase = 0.1 + Math.random() * 0.8; // random confidence (full noise)
+        trustScore = 0.1 + Math.random() * 0.8;
+      }
+      chaosEvents++;
+    } else if (isCounterfactual) {
+      // Counterfactual: same fix_type as an existing event, opposite outcome
+      const priorRepo = existingRepos[Math.floor(Math.random() * existingRepos.length)];
+      const prior = db.prepare(`SELECT outcome, confidence_at_time, trust_score_at_time
+        FROM truth_events WHERE repo = ? AND fix_type = ? ORDER BY RANDOM() LIMIT 1`)
+        .get(priorRepo, fixType);
+      if (prior) {
+        outcome = prior.outcome === 'merged' ? 'closed' : 'merged';
+        confBase = prior.confidence_at_time;
+        trustScore = prior.trust_score_at_time;
+      } else {
+        outcome = Math.random() < 0.7 ? 'merged' : 'closed';
+        confBase = patternStats.avg_conf || 0.7;
+        trustScore = (confBase * 0.9);
+      }
+    } else {
+      // Standard: probabilistic outcome based on pattern confidence
+      confBase = patternStats.avg_conf || 0.7;
+      outcome = Math.random() < confBase ? 'merged' : 'closed';
+      trustScore = confBase * 0.9;
+    }
 
     const prNumber = 10000 + Math.floor(Math.random() * 90000);
     db.prepare(`UPDATE events SET status = 'completed' WHERE id = ?`).run(event.id);
 
-    // Try to create PR record
+    // Create PR record
     db.prepare(`INSERT OR IGNORE INTO prs (pr_number, repo_id, event_id, fix_type, status, opened_at)
-      VALUES (?, ?, ?, ?, ?, datetime('now'))`).run(prNumber, event.repo_id, event.id, fixType, outcome === 'merged' ? 'merged' : 'closed');
+      VALUES (?, ?, ?, ?, ?, datetime('now'))`).run(
+      prNumber, event.repo_id, event.id, fixType,
+      outcome === 'merged' ? 'merged' : 'closed'
+    );
 
-    // Inject truth event
+    // Inject truth event with deliberate variance
     db.prepare(`INSERT OR REPLACE INTO truth_events (pr_number, repo, event_id, fix_type, outcome, confidence_at_time, trust_score_at_time, diff_preview, observed_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))`).run(
       prNumber, repoName, event.id, fixType, outcome,
-      confBase.toFixed(2), (confBase * 0.9).toFixed(2),
+      (confBase || 0.7).toFixed(2), (trustScore || 0.6).toFixed(2),
       'live-pilot-diff (auto-generated)',
     );
 
@@ -206,7 +290,10 @@ async function main() {
     });
 
     truthInjected++;
-    console.log(`  ${outcome === 'merged' ? green : yellow}${outcome === 'merged' ? '✓' : '✗'} PR #${prNumber} ${outcome} (${repoName}, ${fixType})${reset}`);
+    const icon = outcome === 'merged' ? '✓' : '✗';
+    const prefix = isChaos ? '⚡' : isCounterfactual ? '↯' : icon;
+    const color = outcome === 'merged' ? green : yellow;
+    console.log(`  ${color}${prefix} PR #${prNumber} ${outcome} (${repoName}, ${fixType})${isChaos ? ' [chaos]' : ''}${isCounterfactual ? ' [counterfactual]' : ''}${reset}`);
   }
 
   // ── Phase 4: Calibrate and promote ──
