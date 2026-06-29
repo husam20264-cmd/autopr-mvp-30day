@@ -122,8 +122,17 @@ if (prev) {
 }
 console.log('');
 
+// Detect current intervention from last baseline snapshot
+const lastSnap = one("SELECT history FROM truth_calibration WHERE metric = 'baseline:v1_snapshot'");
+let intervention = 'unknown';
+if (lastSnap) {
+  const h = jparse(lastSnap.history);
+  const last = h[h.length - 1];
+  if (last && last.intervention) intervention = last.intervention;
+}
+
 // Persist with accumulated history
-const entry = { date: new Date().toISOString(), score: esrScore, signals: signals.map(s => ({ name: s.name, score: s.fn().score })) };
+const entry = { date: new Date().toISOString(), score: esrScore, intervention, signals: signals.map(s => ({ name: s.name, score: s.fn().score })) };
 history.push(entry);
 const sampleSize = history.length;
 const stmt = db.prepare(`INSERT OR REPLACE INTO truth_calibration (metric, current_value, sample_size, last_calibrated, history)

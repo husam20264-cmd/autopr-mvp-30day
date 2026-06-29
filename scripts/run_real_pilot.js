@@ -194,67 +194,56 @@ async function main() {
   // Sample existing repos from truth_events for counterfactuals
   const existingRepos = db.prepare(`SELECT DISTINCT repo FROM truth_events`).all().map(r => r.repo);
 
-  // Determine target distribution for this run (varies per run to create regime shifts)
-  const runDistribution = (() => {
-    const runNumber = (db.prepare(`SELECT COUNT(*) AS n FROM truth_calibration WHERE metric = 'baseline:v1_snapshot'`).get().n || 0) + 1;
-    // Cycle distribution pattern to prevent mode locking
-    const cycles = [
-      [0.5, 0.2, 0.2, 0.1], // balanced
-      [0.3, 0.3, 0.2, 0.2], // even
-      [0.6, 0.1, 0.1, 0.2], // bug-heavy
-      [0.2, 0.3, 0.3, 0.2], // lint + dependency heavy
-    ];
-    return cycles[(runNumber - 1) % cycles.length];
-  })();
+  // ── Clean intervention profiles ──
+  // Each run changes EXACTLY ONE variable from baseline.
+  // This isolates causal effects instead of mixing everything.
+  // Use dedicated run_counter (INSERT OR REPLACE won't increment COUNT)
+  db.prepare(`INSERT INTO truth_calibration (metric, current_value, sample_size, last_calibrated)
+    VALUES ('run_counter', 1, 1, datetime('now'))
+    ON CONFLICT(metric) DO UPDATE SET current_value = current_value + 1`).run();
+  const runNumber = db.prepare(`SELECT current_value FROM truth_calibration WHERE metric = 'run_counter'`).get().current_value;
+  const profiles = [
+    { name: 'baseline',        fixType: 'trivial_bug', chaos: 0.0, counter: false, label: 'trivial_bug only' },
+    { name: 'lint_test',       fixType: 'lint',        chaos: 0.0, counter: false, label: 'lint only' },
+    { name: 'dep_test',        fixType: 'dependency',  chaos: 0.0, counter: false, label: 'dependency only' },
+    { name: 'chaos_test',      fixType: 'trivial_bug', chaos: 0.4, counter: false, label: 'trivial_bug + chaos' },
+    { name: 'counter_test',    fixType: 'trivial_bug', chaos: 0.0, counter: true,  label: 'trivial_bug + counterfactuals' },
+    { name: 'mixed_test',      fixType: 'all',         chaos: 0.0, counter: false, label: 'even mix' },
+  ];
+  const profile = profiles[(runNumber - 1) % profiles.length];
+
+  // Store intervention type for causal analysis
+  const interventionId = `run-${runNumber}-${profile.name}`;
+  console.log(`  ${dim}  intervention: ${profile.name} (${profile.label})${reset}`);
 
   let truthInjected = 0;
   let chaosEvents = 0;
   const pendingEvents = db.prepare(`SELECT * FROM events WHERE status = 'pending'`).all();
   const eventsToProcess = pendingEvents.slice(0, 15);
 
-  // Build per-event fix type assignment that follows the target distribution
-  const eventFixTypes = [];
-  for (let i = 0; i < eventsToProcess.length; i++) {
-    // Sample from target distribution
-    const r = Math.random();
-    let cum = 0;
-    let chosen = FIX_TYPES[0];
-    for (let j = 0; j < FIX_TYPES.length; j++) {
-      cum += runDistribution[j];
-      if (r <= cum) { chosen = FIX_TYPES[j]; break; }
-    }
-    eventFixTypes.push(chosen);
-  }
-
   for (let idx = 0; idx < eventsToProcess.length; idx++) {
     const event = eventsToProcess[idx];
     const payload = JSON.parse(event.payload);
     const repoName = payload.repository?.full_name || 'unknown/repo';
-    const fixType = eventFixTypes[idx];
-    const isChaos = Math.random() < CHAOS_RATE;
-    const isCounterfactual = !isChaos && Math.random() < COUNTERFACTUAL_RATE && existingRepos.length > 0;
+    const isChaos = profile.chaos > 0 && Math.random() < profile.chaos;
+    const isCounterfactual = !isChaos && profile.counter && existingRepos.length > 0 && Math.random() < 0.3;
 
-    // Determine outcome
+    // Fix type: single type from profile, or cycled if 'all'
+    const fixType = profile.fixType === 'all'
+      ? FIX_TYPES[idx % FIX_TYPES.length]
+      : profile.fixType;
+
+    // Determine outcome based on clean profile
     let outcome, trustScore, confBase;
-    if (isChaos) {
-      // Chaos: force rejection or low-trust event regardless of pattern confidence
-      const chaosMode = Math.random();
-      if (chaosMode < 0.4) {
-        outcome = 'closed';
-        confBase = 0.7 + Math.random() * 0.25; // high confidence but still closed
-        trustScore = 0.6 + Math.random() * 0.3;
-      } else if (chaosMode < 0.7) {
-        outcome = 'merged';
-        confBase = 0.3 + Math.random() * 0.3; // low confidence but still merged
-        trustScore = 0.3 + Math.random() * 0.3;
-      } else {
-        outcome = Math.random() < 0.5 ? 'merged' : 'closed';
-        confBase = 0.1 + Math.random() * 0.8; // random confidence (full noise)
-        trustScore = 0.1 + Math.random() * 0.8;
-      }
+
+    if (profile.name === 'chaos_test' && isChaos) {
+      // Chaos: force rejection independent of confidence
+      outcome = Math.random() < 0.5 ? 'merged' : 'closed';
+      confBase = 0.3 + Math.random() * 0.6;
+      trustScore = 0.3 + Math.random() * 0.6;
       chaosEvents++;
-    } else if (isCounterfactual) {
-      // Counterfactual: same fix_type as an existing event, opposite outcome
+    } else if (profile.name === 'counter_test' && isCounterfactual) {
+      // Counterfactual: opposite of an existing event's outcome
       const priorRepo = existingRepos[Math.floor(Math.random() * existingRepos.length)];
       const prior = db.prepare(`SELECT outcome, confidence_at_time, trust_score_at_time
         FROM truth_events WHERE repo = ? AND fix_type = ? ORDER BY RANDOM() LIMIT 1`)
@@ -266,10 +255,10 @@ async function main() {
       } else {
         outcome = Math.random() < 0.7 ? 'merged' : 'closed';
         confBase = patternStats.avg_conf || 0.7;
-        trustScore = (confBase * 0.9);
+        trustScore = confBase * 0.9;
       }
     } else {
-      // Standard: probabilistic outcome based on pattern confidence
+      // Standard: probabilistic outcome, no chaos
       confBase = patternStats.avg_conf || 0.7;
       outcome = Math.random() < confBase ? 'merged' : 'closed';
       trustScore = confBase * 0.9;
@@ -365,6 +354,7 @@ async function main() {
     history = json_set(history, '$[#]', json_object(
       'date', datetime('now'),
       'event', 'live_pilot_run',
+      'intervention', ?,
       'repos', ?,
       'truth_events', ?,
       'patterns', ?,
@@ -372,7 +362,7 @@ async function main() {
       'bugs_found', ?,
       'merge_rate', ?
     ))
-  WHERE metric = 'baseline:v1_snapshot'`).run(1, truthCount, repoCount, truthCount, patternCount, ciFailuresFound, issuesFound, mergeRate);
+  WHERE metric = 'baseline:v1_snapshot'`).run(1, truthCount, profile.name, repoCount, truthCount, patternCount, ciFailuresFound, issuesFound, mergeRate);
 
   console.log(`\n  ${green}Baseline updated with live pilot data${reset}`);
   console.log(`\n  ${dim}Run: node scripts/dashboard.js${reset}`);
