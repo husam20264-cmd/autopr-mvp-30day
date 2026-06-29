@@ -87,14 +87,22 @@ async function main() {
   const eligible = discovered.filter(r => r.stargazers_count >= MIN_STARS);
   console.log(`  ${green}Eligible (≥${MIN_STARS} stars): ${eligible.length} repos${reset}`);
 
-  for (const repo of eligible.slice(0, 20)) {
+  const sortedRepos = eligible.slice(0, 20);
+  const splitPoint = Math.floor(sortedRepos.length * 0.8);
+  // Attach split to each repo object for later use
+  for (let ri = 0; ri < sortedRepos.length; ri++) {
+    const repo = sortedRepos[ri];
     const lang = repo.language || 'unknown';
+    repo._split = ri < splitPoint ? 'train' : 'eval';
     db.prepare(`
-      INSERT OR REPLACE INTO repos (id, owner, name, full_name, default_branch, language, stars, topics, scored_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
-    `).run(repo.id, repo.owner.login, repo.name, repo.full_name, repo.default_branch, lang, repo.stargazers_count, (repo.topics || []).join(','));
-    console.log(`  ${dim}  stored: ${repo.full_name} (⭐${repo.stargazers_count}, ${lang})${reset}`);
+      INSERT OR REPLACE INTO repos (id, owner, name, full_name, default_branch, language, stars, topics, scored_at, split)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), ?)
+    `).run(repo.id, repo.owner.login, repo.name, repo.full_name, repo.default_branch, lang, repo.stargazers_count, (repo.topics || []).join(','), repo._split);
+    console.log(`  ${dim}  stored: ${repo.full_name} (⭐${repo.stargazers_count}, ${lang}, ${repo._split})${reset}`);
   }
+  const trainCount = sortedRepos.filter((_, i) => i < splitPoint).length;
+  const evalCount = sortedRepos.filter((_, i) => i >= splitPoint).length;
+  console.log(`  ${dim}  splits: ${trainCount} train / ${evalCount} eval${reset}`);
 
   // ── Phase 2: Collect data from repos ──
   console.log(`\n${bold}Phase 2: Collect Real Data${reset}`);
@@ -103,7 +111,12 @@ async function main() {
   let issuesFound = 0;
   let dataCollected = 0;
 
-  for (const repo of eligible.slice(0, 10)) {
+  // Ensure eval repos are included in data collection
+  const trainRepos2 = sortedRepos.filter(r => r._split !== 'eval');
+  const evalRepos2 = sortedRepos.filter(r => r._split === 'eval');
+  const phase2Repos = [...trainRepos2.slice(0, 8), ...evalRepos2].slice(0, 12);
+
+  for (const repo of phase2Repos) {
     const [owner, name] = repo.full_name.split('/');
     try {
       // Check for failing CI

@@ -21,6 +21,7 @@ CREATE TABLE IF NOT EXISTS repos (
   stars INTEGER DEFAULT 0,
   topics TEXT,
   scored_at TEXT,
+  split TEXT NOT NULL DEFAULT 'train',
   created_at TEXT DEFAULT (datetime('now')),
   FOREIGN KEY (installation_id) REFERENCES installations(id)
 );
