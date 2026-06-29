@@ -194,23 +194,17 @@ async function main() {
   // Sample existing repos from truth_events for counterfactuals
   const existingRepos = db.prepare(`SELECT DISTINCT repo FROM truth_events`).all().map(r => r.repo);
 
-  // ── Clean intervention profiles ──
-  // Each run changes EXACTLY ONE variable from baseline.
-  // This isolates causal effects instead of mixing everything.
+  // ── Adaptive intervention selection ──
+  // Each run targets the most under-represented fix type to actively
+  // collapse the Simpson H gap, instead of blind cycling through profiles.
   // Use dedicated run_counter (INSERT OR REPLACE won't increment COUNT)
   db.prepare(`INSERT INTO truth_calibration (metric, current_value, sample_size, last_calibrated)
     VALUES ('run_counter', 1, 1, datetime('now'))
     ON CONFLICT(metric) DO UPDATE SET current_value = current_value + 1`).run();
   const runNumber = db.prepare(`SELECT current_value FROM truth_calibration WHERE metric = 'run_counter'`).get().current_value;
 
-  // Profile roles:
-  //   baseline:    noise shuffler — mixes 40% non-trivial types to break fixation
-  //   chaos_test:  decorrelation injector — anti-persistence + chaos events
-  //   counter_test:anti-persistence trigger — picks least-used fix type + counterfactuals
-  //   dep_test:    high leverage for minority type (dependency)
-  //   lint_test:   single-type probe (lint)
-  //   mixed_test:  even cycle across all 4 types
-  const profiles = [
+  // Profile definitions
+  const ALL_PROFILES = [
     { name: 'baseline',     fixType: 'trivial_bug', shuffle: 0.4, antiPersist: false, chaos: 0.0, counter: false, label: 'noise shuffler (40% non-trivial)' },
     { name: 'lint_test',    fixType: 'lint',        shuffle: 0.0, antiPersist: false, chaos: 0.0, counter: false, label: 'lint only' },
     { name: 'dep_test',     fixType: 'dependency',  shuffle: 0.0, antiPersist: false, chaos: 0.0, counter: false, label: 'dependency only' },
@@ -218,7 +212,39 @@ async function main() {
     { name: 'counter_test', fixType: 'trivial_bug', shuffle: 0.0, antiPersist: true,  chaos: 0.0, counter: true,  label: 'anti-persistence + counterfactuals' },
     { name: 'mixed_test',   fixType: 'all',         shuffle: 0.0, antiPersist: false, chaos: 0.0, counter: false, label: 'even mix' },
   ];
-  const profile = profiles[(runNumber - 1) % profiles.length];
+
+  // Adaptive selection: pick profile targeting the most under-represented fix type
+  function selectProfile() {
+    const dist = db.prepare(`
+      SELECT fix_type, COUNT(*) as cnt FROM truth_events
+      GROUP BY fix_type ORDER BY cnt ASC
+    `).all();
+    const total = dist.reduce((s, r) => s + r.cnt, 0);
+
+    if (total < 20) return ALL_PROFILES[(runNumber - 1) % ALL_PROFILES.length];
+
+    // Gap from uniform: negative = under-represented
+    const target = total / 4;
+    let worstType = dist[0].fix_type;
+    let worstGap = dist[0].cnt - target;
+
+    for (const row of dist) {
+      const gap = row.cnt - target;
+      if (gap < worstGap) { worstGap = gap; worstType = row.fix_type; }
+    }
+
+    // Find best profile for the worst-off type
+    const exact = ALL_PROFILES.find(p => p.fixType === worstType);
+    if (exact && worstGap < -0.15 * target) {
+      // Severe under-representation: target it aggressively
+      if (Math.random() < 0.8) return exact;
+    }
+
+    // Moderate gap: cycling is fine
+    return ALL_PROFILES[(runNumber - 1) % ALL_PROFILES.length];
+  }
+
+  const profile = selectProfile();
 
   // Store intervention type for causal analysis
   const interventionId = `run-${runNumber}-${profile.name}`;
@@ -262,16 +288,38 @@ async function main() {
     return profile.fixType;
   }
 
-  // Pre-assign fix types to all events with streak breaker
+  // Pre-assign fix types to all events with streak breaker + saturation skipping
   let truthInjected = 0;
   let chaosEvents = 0;
   const pendingEvents = db.prepare(`SELECT * FROM events WHERE status = 'pending'`).all();
-  const eventsToProcess = pendingEvents.slice(0, 15);
+  const eventsToProcess = pendingEvents.slice(0, 2);
+
+  // Saturation: skip repo+fixType combos that already have ≥3 events
+  function isSaturated(repo, ft) {
+    const n = db.prepare(`SELECT COUNT(*) AS c FROM truth_events WHERE repo = ? AND fix_type = ?`).get(repo, ft).c;
+    return n >= 3;
+  }
 
   const assignments = [];
   for (let idx = 0; idx < eventsToProcess.length; idx++) {
-    const fixType = pickFixType(idx);
+    let fixType = pickFixType(idx);
     const event = eventsToProcess[idx];
+    const payload = JSON.parse(event.payload);
+    const repoName = payload.repository?.full_name || 'unknown/repo';
+
+    // If this combo is saturated, find the least-saturated type for this repo
+    if (isSaturated(repoName, fixType)) {
+      const counts = {};
+      for (const ft of FIX_TYPES) {
+        counts[ft] = db.prepare(`SELECT COUNT(*) AS c FROM truth_events WHERE repo = ? AND fix_type = ?`).get(repoName, ft).c;
+      }
+      const minCount = Math.min(...Object.values(counts));
+      const candidates = FIX_TYPES.filter(ft => counts[ft] === minCount);
+      fixType = candidates.includes(fixType)
+        ? fixType  // already the least saturated
+        : candidates[Math.floor(Math.random() * candidates.length)];
+    }
+
     const isChaos = profile.chaos > 0 && Math.random() < profile.chaos;
     const isCounterfactual = !isChaos && profile.counter && existingRepos.length > 0 && Math.random() < 0.3;
     assignments.push({ event, fixType, isChaos, isCounterfactual, originalIdx: idx });

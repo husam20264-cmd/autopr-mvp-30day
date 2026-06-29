@@ -31,7 +31,7 @@ function checkTruthLayer() {
   const closed   = one(`SELECT COUNT(*) AS n FROM truth_events WHERE outcome = 'closed'`).n;
   const mergePct = total > 0 ? Math.round(100 * merged / total) : 0;
 
-  // Effective n via fix-type autocorrelation
+  // Effective n via fix-type autocorrelation (all-time for stability)
   const fixTypes = all(`SELECT fix_type FROM truth_events ORDER BY id`).map(r => r.fix_type);
   const nEff = total > 0 ? Math.round(ar1EffectiveN(fixTypes)) : 0;
 

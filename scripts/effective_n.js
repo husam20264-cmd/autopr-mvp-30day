@@ -5,140 +5,135 @@ const db = getDb();
 function one(sql) { return db.prepare(sql).get(); }
 function all(sql) { return db.prepare(sql).all(); }
 
-// ── Effective Sample Size Estimates ──
-
-// 1. AR1 autocorrelation: n_eff = n * (1 - ρ) / (1 + ρ)
-// ρ = proportion of consecutive events with same fix_type
-function ar1EffectiveN(events) {
-  if (events.length < 2) return events.length;
+// ── Helpers ──
+function ar1Metric(values) {
+  if (values.length < 2) return values.length;
   let same = 0;
-  for (let i = 1; i < events.length; i++) {
-    if (events[i] === events[i - 1]) same++;
+  for (let i = 1; i < values.length; i++) {
+    if (values[i] === values[i - 1]) same++;
   }
-  const rho = same / (events.length - 1);
-  return events.length * (1 - rho) / (1 + rho);
+  const rho = values.length > 1 ? same / (values.length - 1) : 0;
+  return { rho, nEff: values.length * (1 - rho) / (1 + rho) };
 }
 
-// 2. Simpson reciprocal: effective categories = 1 / Σ(pᵢ²)
-// Measures how many independent categories the data spans
-function simpsonEffectiveN(counts) {
-  const total = counts.reduce((s, c) => s + c, 0);
-  if (total === 0) return 0;
-  const H = counts.reduce((s, c) => { const p = c / total; return s + p * p; }, 0);
-  return total * (1 / H) / total * 1; // normalize: proportion of simpson diversity
+function simpsonH(counts) {
+  const total = Object.values(counts).reduce((s, v) => s + v, 0);
+  if (total === 0) return { H: 0, nEff: 0 };
+  const h = 1 / Object.values(counts).reduce((s, v) => { const p = v / total; return s + p * p; }, 0);
+  return { H: h, nEff: h };
 }
 
-// 3. Conservative bound: minimum of all estimates
-function conservativeEffectiveN(estimates) {
-  return Math.min(...estimates.filter(e => e > 0));
+// ── Compute all metrics for a given event list ──
+function analyze(events, label) {
+  const total = events.length;
+  if (total < 2) return null;
+
+  const fixTypes = events.map(e => e.fix_type);
+  const outcomes = events.map(e => e.outcome);
+  const repos = events.map(e => e.repo);
+
+  const ar1FT = ar1Metric(fixTypes);
+  const ar1Out = ar1Metric(outcomes);
+  const ar1Rep = ar1Metric(repos);
+
+  const ftCounts = {};
+  events.forEach(e => { ftCounts[e.fix_type] = (ftCounts[e.fix_type] || 0) + 1; });
+  const simFT = simpsonH(ftCounts);
+
+  const repoCounts = {};
+  events.forEach(e => { repoCounts[e.repo] = (repoCounts[e.repo] || 0) + 1; });
+  const simRepo = simpsonH(repoCounts);
+
+  // Distribution breakdown
+  const dist = Object.entries(ftCounts)
+    .sort((a, b) => b[1] - a[1])
+    .map(([t, c]) => `${t}=${c} (${(c / total * 100).toFixed(1)}%)`)
+    .join(', ');
+
+  // Conservative bound
+  const ests = [ar1FT.nEff, ar1Out.nEff, ar1Rep.nEff, simFT.nEff, simRepo.nEff];
+  const cons = Math.min(...ests);
+
+  return {
+    total, label,
+    ar1FixType: Math.round(ar1FT.nEff * 10) / 10,
+    ar1Outcome: Math.round(ar1Out.nEff * 10) / 10,
+    ar1Repo: Math.round(ar1Rep.nEff * 10) / 10,
+    simpsonFt: Math.round(simFT.H * 10) / 10,
+    simpsonRepo: Math.round(simRepo.H * 10) / 10,
+    ar1Rho: ar1FT.rho,
+    conservative: Math.round(cons * 10) / 10,
+    distribution: dist,
+    estimates: ests,
+  };
 }
 
-// ── Run ──
+function printSection(result) {
+  if (!result) return;
+  console.log(`  ── ${result.label} ──`);
+  console.log(`  Raw events:                ${String(result.total).padStart(5)}`);
+  console.log(`  Distribution:              ${result.distribution}`);
+  console.log(`  AR1 (fix-type):            n_eff = ${String(result.ar1FixType).padStart(5)}  (ρ = ${(result.ar1Rho * 100).toFixed(1)}%)`);
+  console.log(`  AR1 (outcome):             n_eff = ${String(result.ar1Outcome).padStart(5)}`);
+  console.log(`  Simpson H (fix-type):      n_eff = ${String(result.simpsonFt).padStart(5)}`);
+  console.log(`  Simpson H (repo):          n_eff = ${String(result.simpsonRepo).padStart(5)}`);
+  console.log(`  Conservative eff_n:        ${String(result.conservative).padStart(5)}`);
+  console.log(`  Stats:                     AR1 ρ=${(result.ar1Rho*100).toFixed(0)}%, Simpson H=${result.simpsonFt}, min(ests)=${result.conservative}`);
+}
+
+// ── Main ──
 function main() {
-  const total = one('SELECT COUNT(*) AS n FROM truth_events').n || 0;
-  const events = all('SELECT fix_type, outcome, repo FROM truth_events ORDER BY id');
-
-  if (total === 0) {
-    console.log('\n  No events found. Run run_real_pilot.js first.\n');
+  const allEvents = all('SELECT fix_type, outcome, repo FROM truth_events ORDER BY id');
+  if (allEvents.length === 0) {
+    console.log('\n  No events found.\n');
     closeDb();
     return;
   }
 
-  // AR1 on fix_type sequence
-  const fixTypes = events.map(e => e.fix_type);
-  const nAR1 = ar1EffectiveN(fixTypes);
+  const cumulative = analyze(allEvents, 'Cumulative (all-time)');
+  const windowEvents = allEvents.slice(-100);
+  const windowed = analyze(windowEvents, `Windowed (last ${windowEvents.length})`);
 
-  // AR1 on outcome sequence (merged/closed/reopened)
-  const outcomes = events.map(e => e.outcome);
-  const nOutcome = ar1EffectiveN(outcomes);
-
-  // AR1 on repo sequence (same repo = same project context)
-  const repos = events.map(e => e.repo);
-  const nRepo = ar1EffectiveN(repos);
-
-  // Simpson diversity: fix_type
-  const ftCounts = {};
-  events.forEach(e => { ftCounts[e.fix_type] = (ftCounts[e.fix_type] || 0) + 1; });
-  const ftSimpson = 1 / Object.values(ftCounts).reduce((s, c) => { const p = c / total; return s + p * p; }, 0);
-  const effFtTypes = total * (ftSimpson / Object.keys(ftCounts).length); // scaled
-
-  // Simpson diversity: repo
-  const repoCounts = {};
-  events.forEach(e => { repoCounts[e.repo] = (repoCounts[e.repo] || 0) + 1; });
-  const repoSimpson = 1 / Object.values(repoCounts).reduce((s, c) => { const p = c / total; return s + p * p; }, 0);
-
-  // Run count from baseline history
-  const snap = one("SELECT history FROM truth_calibration WHERE metric = 'baseline:v1_snapshot'");
-  let runs = 0;
-  let uniqueInterventions = 0;
-  if (snap) {
-    const h = JSON.parse(snap.history || '[]');
-    runs = h.length;
-    uniqueInterventions = new Set(h.filter(r => r.intervention).map(r => r.intervention)).size;
-  }
-
-  // Count run_counter values
+  const runs = one("SELECT COUNT(*) AS n FROM truth_calibration WHERE metric = 'baseline:v1_snapshot'").n || 0;
   const rc = one("SELECT current_value FROM truth_calibration WHERE metric = 'run_counter'");
   const runCounterVal = rc ? rc.current_value : 0;
-
-  // ── Consolidated Estimates ──
-  const runBased = runCounterVal > 0 ? total / runCounterVal : total;   // events per unique run
-  const profileBased = uniqueInterventions > 0 ? total / uniqueInterventions : total;
-
-  const estimates = {
-    raw_n: total,
-    ar1_fix_type: Math.round(nAR1 * 10) / 10,
-    ar1_outcome: Math.round(nOutcome * 10) / 10,
-    ar1_repo: Math.round(nRepo * 10) / 10,
-    simpson_fix_type: Math.round(ftSimpson * 10) / 10,
-    simpson_repo: Math.round(repoSimpson * 10) / 10,
-    run_based: Math.round(runBased * 10) / 10,
-    profile_based: Math.round(profileBased * 10) / 10,
-  };
-
-  const conservative = Math.min(
-    nAR1, nOutcome, nRepo,
-    ftSimpson, repoSimpson,
-    runBased, profileBased,
-    total
-  );
+  const uniqueInt = allEvents.reduce((s, e) => s.add(e.fix_type), new Set()).size;
 
   console.log('');
   console.log('═══ Effective Sample Size Analysis ═══');
   console.log('');
-  console.log(`  Raw events:                ${String(total).padStart(5)}`);
-  console.log(`  ── Autocorrelation (AR1) ──`);
-  console.log(`  Fix-type persistence:      ${String(estimates.ar1_fix_type).padStart(5)}  (${(nAR1/total*100).toFixed(0)}% of raw)`);
-  console.log(`  Outcome persistence:       ${String(estimates.ar1_outcome).padStart(5)}  (${(nOutcome/total*100).toFixed(0)}% of raw)`);
-  console.log(`  Repo persistence:          ${String(estimates.ar1_repo).padStart(5)}  (${(nRepo/total*100).toFixed(0)}% of raw)`);
-  console.log(`  ── Diversity (Simpson reciprocal) ──`);
-  console.log(`  Fix-type diversity:        ${String(estimates.simpson_fix_type).padStart(5)}  (~${Object.keys(ftCounts).length} types)`);
-  console.log(`  Repo diversity:            ${String(estimates.simpson_repo).padStart(5)}  (~${Object.keys(repoCounts).length} repos)`);
-  console.log(`  ── Structural ──`);
-  console.log(`  Independent runs:          ${String(runs).padStart(5)}  (${runCounterVal} via counter)`);
-  console.log(`  Unique intervention types: ${String(uniqueInterventions).padStart(5)}`);
-  console.log(`  Events per run:            ${String(Math.round(total / Math.max(runs, 1))).padStart(5)}`);
-  console.log(`  Events per profile:        ${String(Math.round(total / Math.max(uniqueInterventions, 1))).padStart(5)}`);
+
+  printSection(cumulative);
   console.log('');
-  console.log(`  ── Conservative effective n ──`);
-  console.log(`  ${'≈'.repeat(40)}`);
-  console.log(`  Effective n (minimum):     ${String(Math.round(conservative)).padStart(5)}`);
-  console.log(`  Degrees of freedom loss:   ${(100 - conservative / total * 100).toFixed(0)}%`);
-  console.log(`  ${'≈'.repeat(40)}`);
+  printSection(windowed);
+
+  // Operational recommendation
+  const opN = windowed ? Math.min(windowed.ar1FixType, windowed.simpsonFt) : cumulative.ar1FixType;
+  const opSource = windowed ? 'windowed min(AR1, Simpson)' : 'cumulative AR1';
+
   console.log('');
-  console.log('  ⚠  Granger causality needs ≥10 independent data points.');
-  console.log(`     With ${runs} runs (${Math.round(conservative)} effective n), statistical tests are:`);
-  if (conservative < 10) {
-    console.log('     🔴 UNDER POWERED — do not trust directional conclusions');
-  } else if (conservative < 20) {
-    console.log('     🟡 WEAK — conclusions are provisional');
+  console.log(`  ${'='.repeat(50)}`);
+  console.log(`  OPERATIONAL Effective n:     ${String(Math.round(opN)).padStart(5)}  (${opSource})`);
+  console.log(`  ${'='.repeat(50)}`);
+  console.log(`  Structural info:             ${runs} runs, ${runCounterVal} via counter, ${uniqueInt} fix types`);
+  console.log('');
+
+  // Honest assessment
+  console.log(`  Current state:`);
+  console.log(`    Raw n = ${allEvents.length}, eff_n = ${Math.round(opN)} → ${(opN / allEvents.length * 100).toFixed(0)}% info efficiency`);
+  console.log(`    System generates ${((1 - opN / allEvents.length) * 100).toFixed(0)}% redundant events (same info, different label)`);
+  console.log('');
+
+  if (opN < 50) {
+    console.log(`  🔴 Effective n below 50 — system not yet generating diverse info`);
+    console.log(`     Need: more minority fix-types (dependency ${cumulative.distribution.match(/dependency=\d+/)?.[0]?.split('=')?.[1] || 0}, ci_failure ${cumulative.distribution.match(/ci_failure=\d+/)?.[0]?.split('=')?.[1] || 0})`);
+    console.log(`     Tool: node scripts/run_real_pilot.js continues adaptive targeting`);
+  } else if (opN < 100) {
+    console.log(`  🟡 Effective n adequate — Granger may produce tentative results`);
+    console.log(`     Target 100+ for stable causal inference`);
   } else {
-    console.log('     🟢 ADEQUATE — conclusions have statistical support');
+    console.log(`  🟢 Effective n sufficient — statistical tests have adequate power`);
   }
-  console.log('');
-  console.log('  📐 n_eff = min(AR1_fix, AR1_outcome, AR1_repo, Simpson_ft, Simpson_repo, run_based, profile_based)');
-  console.log(`     = min(${[nAR1, nOutcome, nRepo, ftSimpson, repoSimpson, runBased, profileBased].map(v => v.toFixed(1)).join(', ')})`);
-  console.log(`     = ${conservative.toFixed(1)}`);
   console.log('');
 
   closeDb();
