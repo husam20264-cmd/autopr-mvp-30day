@@ -179,9 +179,16 @@ let reverseDir = 'NONE';
 if (revDeltaR2 > 0.05 && revAicDelta > 2) reverseDir = 'Calibration → ESR (weak)';
 else if (revDeltaR2 > 0.2 || revAicDelta > 4) reverseDir = 'Calibration → ESR';
 
+// ── Effective degrees of freedom ──
+// Granger with n data points at lag L has n-L-1 effective observations
+const effDF = n - lag - 1;
+const dfWarning = effDF < 10
+  ? `\n  ⚠  WARNING: ${effDF} effective DF is too few for reliable Granger inference. Need ≥10.\n     Results are provisional and may reverse with more data.`
+  : '';
+
 // ── Output ──
 console.log('\n═══ Granger Causality Test ═══\n');
-console.log(`  Data points:       ${n}`);
+console.log(`  Data points:       ${n} (eff DF for test: ${effDF})${dfWarning}`);
 console.log(`  Optimal lag:       ${lag}`);
 console.log(`  ESR range:         [${Math.min(...esrSeries).toFixed(3)}, ${Math.max(...esrSeries).toFixed(3)}]`);
 console.log(`  Cal range:         [${Math.min(...calDivSeries).toFixed(3)}, ${Math.max(...calDivSeries).toFixed(3)}]`);
@@ -201,7 +208,11 @@ console.log(`  Direction:         ${reverseDir}`);
 // ── Combined verdict ──
 console.log(`\n  ── Causal Architecture ──`);
 let arch;
-if (strength === 'strong' && revDeltaR2 <= 0) {
+let archNote = '';
+if (effDF < 10) {
+  arch = '⚠ INSUFFICIENT DF — any directional claim is unreliable';
+  archNote = `  Only ${effDF} effective observations. Need ≥10 for statistical minimum.`;
+} else if (strength === 'strong' && revDeltaR2 <= 0) {
   arch = 'UNIDIRECTIONAL (ESR → Cal) — knowledge drives calibration adjustment';
 } else if (strength === 'strong' && revDeltaR2 > 0.05) {
   arch = 'BIDIRECTIONAL (ESR ↔ Cal) — feedback loop active';
@@ -213,6 +224,7 @@ if (strength === 'strong' && revDeltaR2 <= 0) {
   arch = 'WEAK/UNCLEAR — insufficient temporal separation';
 }
 console.log(`  ${arch}`);
+if (archNote) console.log(archNote);
 console.log('');
 
 // ── Persist ──

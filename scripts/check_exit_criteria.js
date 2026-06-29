@@ -9,6 +9,17 @@ function green(msg) { return `  ✅ ${msg}`; }
 function red(msg)   { return `  ❌ ${msg}`; }
 function gray(msg)  { return `  ⚪ ${msg}`; }
 
+// ── Effective n from fix-type autocorrelation ──
+function ar1EffectiveN(events) {
+  if (events.length < 2) return events.length;
+  let same = 0;
+  for (let i = 1; i < events.length; i++) {
+    if (events[i] === events[i - 1]) same++;
+  }
+  const rho = same / (events.length - 1);
+  return events.length * (1 - rho) / (1 + rho);
+}
+
 // ── 1. TRUTH LAYER STABILITY ─────────────────────────────
 function checkTruthLayer() {
   console.log('\n── 1. TRUTH LAYER STABILITY ──');
@@ -20,6 +31,10 @@ function checkTruthLayer() {
   const closed   = one(`SELECT COUNT(*) AS n FROM truth_events WHERE outcome = 'closed'`).n;
   const mergePct = total > 0 ? Math.round(100 * merged / total) : 0;
 
+  // Effective n via fix-type autocorrelation
+  const fixTypes = all(`SELECT fix_type FROM truth_events ORDER BY id`).map(r => r.fix_type);
+  const nEff = total > 0 ? Math.round(ar1EffectiveN(fixTypes)) : 0;
+
   const topRepo  = one(`
     SELECT repo, ROUND(100.0 * COUNT(*) / (SELECT COUNT(*) FROM truth_events), 1) AS pct
     FROM truth_events GROUP BY repo ORDER BY COUNT(*) DESC LIMIT 1
@@ -27,12 +42,13 @@ function checkTruthLayer() {
   const topPct   = topRepo ? +topRepo.pct : 0;
 
   console.log(total >= 150 ? green(`Truth events: ${total}`)   : red(`Truth events: ${total}/150`));
+  console.log(nEff >= 50   ? green(`Effective n (AR1): ${nEff}`): red(`Effective n (AR1): ${nEff}/50 — fix types too autocorrelated`));
   console.log(repos >= 5   ? green(`Distinct repos: ${repos}`)  : red(`Distinct repos: ${repos}/5`));
   console.log(runDays >= 2 ? green(`Time windows: ${runDays}`)  : red(`Time windows: ${runDays}/2`));
   console.log(gray(`Merge rate: ${mergePct}% (${merged} merged / ${closed} closed) — variance check needs 2+ independent runs`));
   console.log(topPct <= 40 ? green(`Top repo dominance: ${topPct}%`) : red(`Top repo dominance: ${topPct}% (>40%)`));
 
-  return total >= 150 && repos >= 5 && runDays >= 2 && topPct <= 40;
+  return total >= 150 && nEff >= 50 && repos >= 5 && runDays >= 2 && topPct <= 40;
 }
 
 // ── 2. LEARNING SIGNAL STABILITY ─────────────────────────
