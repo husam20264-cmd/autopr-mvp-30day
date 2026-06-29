@@ -293,14 +293,20 @@ async function main() {
       'live-pilot-diff (auto-generated)',
     );
 
-    // Run reconciler
-    const reconciler = new TruthReconciler();
-    await reconciler.reconcile({
-      prNumber, repo: repoName, fixType, outcome,
-      eventId: event.id,
-      diffPreview: 'live-pilot-diff',
-      contextSnapshot: { language: 'unknown', source: 'live-discovery' },
-    });
+    // Run reconciler only for train repos — eval repos are held out
+    const repoRec = db.prepare('SELECT split FROM repos WHERE full_name = ?').get(repoName);
+    const isEval = repoRec && repoRec.split === 'eval';
+    if (isEval) {
+      chaosEvents++; // count eval events as external validation
+    } else {
+      const reconciler = new TruthReconciler();
+      await reconciler.reconcile({
+        prNumber, repo: repoName, fixType, outcome,
+        eventId: event.id,
+        diffPreview: 'live-pilot-diff',
+        contextSnapshot: { language: 'unknown', source: 'live-discovery' },
+      });
+    }
 
     truthInjected++;
     const icon = outcome === 'merged' ? '✓' : '✗';
