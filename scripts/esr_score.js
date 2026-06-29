@@ -112,17 +112,23 @@ console.log(`\n  ─────────────────────
 console.log(`  ESR Score: ${esrScore.toFixed(3)} / 1.000`);
 console.log(`  Phase: ${esrScore < 0.1 ? 'ESR-1 (stable fixed-point)' : esrScore < 0.3 ? 'ESR-2 (transition)' : 'MLR (multi-regime)'}`);
 
-// Trend direction: compare against stored score if available
-const prev = one("SELECT current_value FROM truth_calibration WHERE metric = 'esr_score'");
+// Trend: compare against stored history if available
+const prev = one("SELECT current_value, history FROM truth_calibration WHERE metric = 'esr_score'");
+let history = [];
 if (prev) {
   const delta = esrScore - prev.current_value;
   console.log(`  Trend: ${delta > 0.01 ? '↑ improving' : delta < -0.01 ? '↓ declining' : '→ stable'} (Δ=${delta.toFixed(3)})`);
+  history = jparse(prev.history);
 }
 console.log('');
 
-// Persist for trend tracking
+// Persist with accumulated history
+const entry = { date: new Date().toISOString(), score: esrScore, signals: signals.map(s => ({ name: s.name, score: s.fn().score })) };
+history.push(entry);
+const sampleSize = history.length;
 const stmt = db.prepare(`INSERT OR REPLACE INTO truth_calibration (metric, current_value, sample_size, last_calibrated, history)
-  VALUES ('esr_score', ?, 1, datetime('now'), ?)`);
-stmt.run(esrScore, JSON.stringify([{ date: new Date().toISOString(), score: esrScore, signals: signals.map(s => ({ name: s.name, score: s.fn().score })) }]));
+  VALUES ('esr_score', ?, ?, datetime('now'), ?)`);
+stmt.run(esrScore, sampleSize, JSON.stringify(history));
+console.log(`  History: ${sampleSize} data point${sampleSize > 1 ? 's' : ''}`);
 
 closeDb();
