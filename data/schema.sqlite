@@ -1,0 +1,314 @@
+CREATE TABLE IF NOT EXISTS installations (
+  id INTEGER PRIMARY KEY,
+  account_login TEXT NOT NULL,
+  account_type TEXT NOT NULL DEFAULT 'user',
+  target_type TEXT,
+  permission TEXT,
+  created_at TEXT DEFAULT (datetime('now')),
+  updated_at TEXT DEFAULT (datetime('now')),
+  uninstalled_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS repos (
+  id INTEGER PRIMARY KEY,
+  owner TEXT NOT NULL,
+  name TEXT NOT NULL,
+  full_name TEXT NOT NULL UNIQUE,
+  default_branch TEXT NOT NULL DEFAULT 'main',
+  installation_id INTEGER DEFAULT 0,
+  score REAL DEFAULT 0,
+  language TEXT,
+  stars INTEGER DEFAULT 0,
+  topics TEXT,
+  scored_at TEXT,
+  created_at TEXT DEFAULT (datetime('now')),
+  FOREIGN KEY (installation_id) REFERENCES installations(id)
+);
+
+CREATE TABLE IF NOT EXISTS events (
+  id TEXT PRIMARY KEY,
+  installation_id INTEGER NOT NULL,
+  repo_id INTEGER,
+  event_type TEXT NOT NULL,
+  action TEXT,
+  payload TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending',
+  created_at TEXT DEFAULT (datetime('now')),
+  FOREIGN KEY (installation_id) REFERENCES installations(id),
+  FOREIGN KEY (repo_id) REFERENCES repos(id)
+);
+
+CREATE TABLE IF NOT EXISTS prs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  pr_number INTEGER,
+  repo_id INTEGER NOT NULL,
+  event_id TEXT NOT NULL,
+  fix_type TEXT NOT NULL,
+  branch_name TEXT,
+  diff_preview TEXT,
+  pr_url TEXT,
+  status TEXT NOT NULL DEFAULT 'pending',
+  error TEXT,
+  opened_at TEXT,
+  created_at TEXT DEFAULT (datetime('now')),
+  FOREIGN KEY (repo_id) REFERENCES repos(id),
+  FOREIGN KEY (event_id) REFERENCES events(id)
+);
+
+CREATE TABLE IF NOT EXISTS accounts (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  github_user_id INTEGER NOT NULL UNIQUE,
+  login TEXT NOT NULL,
+  stripe_customer_id TEXT,
+  subscription_id TEXT,
+  tier TEXT NOT NULL DEFAULT 'free',
+  prs_used INTEGER NOT NULL DEFAULT 0,
+  prs_limit INTEGER NOT NULL DEFAULT 5,
+  billing_period_start TEXT,
+  billing_period_end TEXT,
+  created_at TEXT DEFAULT (datetime('now')),
+  updated_at TEXT DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS analytics (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  date TEXT NOT NULL,
+  metric TEXT NOT NULL,
+  value REAL NOT NULL,
+  metadata TEXT,
+  created_at TEXT DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS patterns (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  fix_type TEXT NOT NULL,
+  pattern_hash TEXT NOT NULL UNIQUE,
+  pattern_data TEXT NOT NULL,
+  file_pattern TEXT,
+  diff_template TEXT,
+  confidence REAL NOT NULL DEFAULT 0.0,
+  times_used INTEGER NOT NULL DEFAULT 0,
+  times_accepted INTEGER NOT NULL DEFAULT 0,
+  times_rejected INTEGER NOT NULL DEFAULT 0,
+  first_seen TEXT DEFAULT (datetime('now')),
+  last_used TEXT DEFAULT (datetime('now')),
+  repos TEXT DEFAULT '[]',
+  global INTEGER DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS rejections (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  repo TEXT NOT NULL,
+  fix_type TEXT NOT NULL,
+  reason TEXT NOT NULL,
+  diff_preview TEXT,
+  context_snapshot TEXT,
+  created_at TEXT DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS memory_cache (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  cache_key TEXT NOT NULL UNIQUE,
+  fix_type TEXT NOT NULL,
+  diff TEXT NOT NULL,
+  confidence REAL NOT NULL DEFAULT 0.0,
+  hit_count INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT DEFAULT (datetime('now')),
+  last_hit TEXT DEFAULT (datetime('now'))
+);
+
+-- Knowledge Graph tables
+CREATE TABLE IF NOT EXISTS knowledge_nodes (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  node_type TEXT NOT NULL,
+  external_id TEXT,
+  label TEXT NOT NULL,
+  properties TEXT DEFAULT '{}',
+  embedding_id INTEGER,
+  created_at TEXT DEFAULT (datetime('now')),
+  updated_at TEXT DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS knowledge_edges (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  source_node_id INTEGER NOT NULL,
+  target_node_id INTEGER NOT NULL,
+  relation_type TEXT NOT NULL,
+  weight REAL DEFAULT 1.0,
+  properties TEXT DEFAULT '{}',
+  created_at TEXT DEFAULT (datetime('now')),
+  FOREIGN KEY (source_node_id) REFERENCES knowledge_nodes(id),
+  FOREIGN KEY (target_node_id) REFERENCES knowledge_nodes(id)
+);
+
+CREATE TABLE IF NOT EXISTS embeddings (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  node_id INTEGER,
+  vector BLOB NOT NULL,
+  model TEXT DEFAULT 'local',
+  dimension INTEGER DEFAULT 128,
+  created_at TEXT DEFAULT (datetime('now')),
+  FOREIGN KEY (node_id) REFERENCES knowledge_nodes(id)
+);
+
+CREATE TABLE IF NOT EXISTS knowledge_index (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  node_type TEXT NOT NULL,
+  field TEXT NOT NULL,
+  value TEXT NOT NULL,
+  node_id INTEGER NOT NULL,
+  FOREIGN KEY (node_id) REFERENCES knowledge_nodes(id)
+);
+
+CREATE TABLE IF NOT EXISTS decision_logs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  event_id TEXT NOT NULL,
+  step TEXT NOT NULL,
+  parent_id INTEGER,
+  decision TEXT NOT NULL,
+  confidence REAL DEFAULT 1.0,
+  reasoning_chain TEXT DEFAULT '[]',
+  input_snapshot TEXT DEFAULT '{}',
+  output_snapshot TEXT DEFAULT '{}',
+  duration_ms INTEGER DEFAULT 0,
+  status TEXT NOT NULL DEFAULT 'completed',
+  created_at TEXT DEFAULT (datetime('now')),
+  FOREIGN KEY (event_id) REFERENCES events(id),
+  FOREIGN KEY (parent_id) REFERENCES decision_logs(id)
+);
+
+CREATE TABLE IF NOT EXISTS decision_alternatives (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  decision_id INTEGER NOT NULL,
+  alternative TEXT NOT NULL,
+  reason_rejected TEXT NOT NULL,
+  score REAL DEFAULT 0.0,
+  created_at TEXT DEFAULT (datetime('now')),
+  FOREIGN KEY (decision_id) REFERENCES decision_logs(id)
+);
+
+CREATE TABLE IF NOT EXISTS causal_edges (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  from_decision_id INTEGER NOT NULL,
+  to_decision_id INTEGER NOT NULL,
+  relation TEXT NOT NULL DEFAULT 'led_to',
+  weight REAL DEFAULT 1.0,
+  rationale TEXT,
+  created_at TEXT DEFAULT (datetime('now')),
+  FOREIGN KEY (from_decision_id) REFERENCES decision_logs(id),
+  FOREIGN KEY (to_decision_id) REFERENCES decision_logs(id)
+);
+
+CREATE TABLE IF NOT EXISTS truth_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  pr_number INTEGER NOT NULL,
+  repo TEXT NOT NULL,
+  event_id TEXT,
+  fix_type TEXT,
+  outcome TEXT NOT NULL CHECK(outcome IN ('merged', 'closed', 'reopened')),
+  merged_by TEXT,
+  confidence_at_time REAL,
+  trust_score_at_time REAL,
+  diff_preview TEXT,
+  payload TEXT DEFAULT '{}',
+  observed_at TEXT DEFAULT (datetime('now')),
+  created_at TEXT DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS truth_calibration (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  metric TEXT NOT NULL UNIQUE,
+  current_value REAL NOT NULL,
+  sample_size INTEGER DEFAULT 0,
+  last_calibrated TEXT DEFAULT (datetime('now')),
+  history TEXT DEFAULT '[]',
+  created_at TEXT DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS accuracy_metrics (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  date TEXT NOT NULL,
+  fix_type TEXT NOT NULL DEFAULT 'all',
+  total INTEGER NOT NULL DEFAULT 0,
+  correct INTEGER NOT NULL DEFAULT 0,
+  incorrect INTEGER NOT NULL DEFAULT 0,
+  false_positive INTEGER NOT NULL DEFAULT 0,
+  false_negative INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT DEFAULT (datetime('now')),
+  UNIQUE(date, fix_type)
+);
+
+CREATE TABLE IF NOT EXISTS meta_behaviors (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  component TEXT NOT NULL,
+  strategy TEXT NOT NULL,
+  context_key TEXT,
+  total_attempts INTEGER DEFAULT 0,
+  total_successes INTEGER DEFAULT 0,
+  avg_confidence REAL DEFAULT 0,
+  avg_duration_ms INTEGER DEFAULT 0,
+  last_outcome TEXT,
+  last_used TEXT DEFAULT (datetime('now')),
+  created_at TEXT DEFAULT (datetime('now')),
+  UNIQUE(component, strategy)
+);
+
+CREATE TABLE IF NOT EXISTS meta_rules (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL UNIQUE,
+  rule_type TEXT NOT NULL,
+  condition TEXT NOT NULL,
+  action TEXT NOT NULL,
+  priority INTEGER DEFAULT 0,
+  success_rate REAL DEFAULT 0,
+  sample_size INTEGER DEFAULT 0,
+  times_fired INTEGER DEFAULT 0,
+  times_correct INTEGER DEFAULT 0,
+  last_fired TEXT,
+  last_mutated TEXT,
+  mutation_history TEXT DEFAULT '[]',
+  active INTEGER DEFAULT 1,
+  created_at TEXT DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS meta_policies (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL UNIQUE,
+  source_pattern TEXT NOT NULL,
+  condition TEXT NOT NULL,
+  action TEXT NOT NULL,
+  confidence REAL NOT NULL,
+  repos_observed INTEGER DEFAULT 0,
+  times_validated INTEGER DEFAULT 0,
+  promoted_at TEXT DEFAULT (datetime('now')),
+  last_verified TEXT,
+  active INTEGER DEFAULT 1
+);
+
+CREATE TABLE IF NOT EXISTS meta_api_strategies (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  context_hash TEXT NOT NULL UNIQUE,
+  repo_language TEXT,
+  fix_type TEXT NOT NULL,
+  file_pattern TEXT,
+  strategy TEXT NOT NULL,
+  confidence REAL DEFAULT 0.5,
+  sample_size INTEGER DEFAULT 0,
+  times_selected INTEGER DEFAULT 0,
+  times_successful INTEGER DEFAULT 0,
+  last_used TEXT,
+  created_at TEXT DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS meta_trap_patterns (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL UNIQUE,
+  trap_type TEXT NOT NULL,
+  trigger_condition TEXT NOT NULL,
+  failure_signature TEXT NOT NULL,
+  severity TEXT DEFAULT 'medium',
+  times_triggered INTEGER DEFAULT 0,
+  times_avoided INTEGER DEFAULT 0,
+  last_hit TEXT,
+  created_at TEXT DEFAULT (datetime('now'))
+);

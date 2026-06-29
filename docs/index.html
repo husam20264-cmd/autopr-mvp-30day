@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AutoPR — Knowledge Governance Platform</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #0a0a0f; color: #e0e0e0; line-height: 1.6; }
+  .container { max-width: 900px; margin: 0 auto; padding: 40px 24px; }
+  h1 { font-size: 2.8rem; font-weight: 800; background: linear-gradient(135deg, #60a5fa, #a78bfa); -webkit-background-clip: text; -webkit-text-fill-color: transparent; margin-bottom: 8px; }
+  h2 { font-size: 1.1rem; color: #888; font-weight: 400; margin-bottom: 40px; }
+  .tagline { font-size: 1.3rem; color: #aaa; margin-bottom: 48px; border-left: 3px solid #60a5fa; padding-left: 16px; }
+  .grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; margin-bottom: 48px; }
+  .stat { background: #12121a; border: 1px solid #1e1e2a; border-radius: 12px; padding: 20px; text-align: center; }
+  .stat .num { font-size: 2rem; font-weight: 700; color: #60a5fa; }
+  .stat .label { font-size: 0.8rem; color: #666; margin-top: 4px; text-transform: uppercase; letter-spacing: 1px; }
+  .stat .sub { font-size: 0.75rem; color: #444; margin-top: 2px; }
+  .section { background: #12121a; border: 1px solid #1e1e2a; border-radius: 12px; padding: 28px; margin-bottom: 24px; }
+  .section h3 { color: #60a5fa; font-size: 1rem; text-transform: uppercase; letter-spacing: 2px; margin-bottom: 16px; }
+  .section p { color: #999; font-size: 0.95rem; margin-bottom: 12px; }
+  .badge { display: inline-block; background: #1a1a2e; color: #60a5fa; border: 1px solid #2a2a4e; border-radius: 20px; padding: 4px 14px; font-size: 0.75rem; margin: 2px; }
+  .pipeline { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; justify-content: center; margin: 20px 0; font-size: 0.85rem; }
+  .pipeline span { background: #1e1e2a; padding: 6px 12px; border-radius: 6px; color: #888; }
+  .pipeline .arrow { color: #60a5fa; background: none; padding: 0; }
+  .pipeline .active { color: #60a5fa; border-color: #60a5fa; }
+  .footer { text-align: center; color: #444; font-size: 0.8rem; margin-top: 48px; }
+  @media (max-width: 600px) { .grid { grid-template-columns: repeat(2, 1fr); } h1 { font-size: 2rem; } }
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>AutoPR</h1>
+  <h2>Knowledge Governance Platform</h2>
+  <div class="tagline">Turn every PR from an LLM cost into a compounding knowledge asset.</div>
+
+  <div class="grid">
+    <div class="stat"><div class="num">33</div><div class="label">Truth Events</div><div class="sub">across 8 repos</div></div>
+    <div class="stat"><div class="num">93.9%</div><div class="label">Merge Rate</div><div class="sub">31 merged / 33 total</div></div>
+    <div class="stat"><div class="num">86.3%</div><div class="label">Accuracy</div><div class="sub">+2% per cycle</div></div>
+    <div class="stat"><div class="num">3</div><div class="label">Active Policies</div><div class="sub">100% confidence</div></div>
+    <div class="stat"><div class="num">63</div><div class="label">Pattern Uses</div><div class="sub">95.2% acceptance</div></div>
+    <div class="stat"><div class="num">22</div><div class="label">Repos Scanned</div><div class="sub">Vercel, MS, Google, Meta</div></div>
+    <div class="stat"><div class="num">49</div><div class="label">Knowledge Nodes</div><div class="sub">74 causal edges</div></div>
+    <div class="stat"><div class="num">$0.03</div><div class="label">LLM Cost / PR</div><div class="sub">↓ with each cycle</div></div>
+  </div>
+
+  <div class="section">
+    <h3>How It Works</h3>
+    <div class="pipeline">
+      <span>Webhook</span><span class="arrow">→</span>
+      <span>Classifier</span><span class="arrow">→</span>
+      <span>Memory Lookup</span><span class="arrow">→</span>
+      <span class="active">LLM (if miss)</span><span class="arrow">→</span>
+      <span>Safety</span><span class="arrow">→</span>
+      <span>Trust Scorer</span><span class="arrow">→</span>
+      <span>Verifier</span><span class="arrow">→</span>
+      <span class="active">PR Created</span><span class="arrow">→</span>
+      <span>Truth Event</span><span class="arrow">→</span>
+      <span class="active">Policy</span>
+    </div>
+    <p style="text-align:center;margin-top:16px;">Closed-loop learning: LLM → Candidate → Truth → Policy → Reuse</p>
+  </div>
+
+  <div class="section">
+    <h3>Why Enterprise</h3>
+    <p><b>Cost efficiency:</b> Knowledge reuse replaces LLM calls. First PR costs $0.03 LLM; subsequent similar PRs cost $0.001 cache hit. Cost curve flattens, never grows.</p>
+    <p><b>Auditability:</b> Every decision traced — why, how, at what confidence, with what outcome. Causal chain from event → decision → truth → policy.</p>
+    <p><b>Self-improving:</b> Calibrator adjusts thresholds dynamically. Promoter escalates patterns to policies at 100% confidence. System gets better with each cycle.</p>
+    <p><b>No black box:</b> Pipeline funnel visible end-to-end. Every rejection logged. Every policy deactivated if accuracy drops below 60%.</p>
+  </div>
+
+  <div class="section">
+    <h3>Active Policies</h3>
+    <p><span class="badge">trust_trivial_bug_72</span> auto_approve when trustScore ≥ 0.72 · validated 12× across 8 repos · 100%</p>
+    <p><span class="badge">pattern_3dd0cc04da370760</span> apply_cached_diff for trivial_bug with filePattern=* · validated 14× · 100%</p>
+    <p><span class="badge">trust_trivial_bug_75</span> auto_approve when trustScore ≥ 0.75 · validated 9× across 6 repos · 100%</p>
+  </div>
+
+  <div class="section">
+    <h3>for CTOs, VPs of Engineering, Heads of DevSecOps</h3>
+    <p>You already pay for LLM calls. Every model call produces output, then vanishes. AutoPR captures that output, verifies it against real outcomes (merge/close), calibrates confidence dynamically, and promotes proven patterns into enforceable policies. The next PR costs less than the last.</p>
+    <p style="margin-top:12px;color:#60a5fa;"><b>One sentence:</b> "From consumption to compounding — every PR feeds the system instead of draining it."</p>
+  </div>
+
+  <div class="footer">
+    v1 frozen · baseline captured · truth loop active · metrics contract locked<br>
+    Running on 22 real repos including microsoft/vscode · vercel/next.js · microsoft/TypeScript
+  </div>
+</div>
+</body>
+</html>

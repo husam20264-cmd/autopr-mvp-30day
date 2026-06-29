@@ -1,0 +1,76 @@
+{
+  "contract_version": "v1",
+  "frozen_at": "2026-06-29",
+  "description": "Immutable metric definitions. Every dashboard value must derive from this spec.",
+  "metrics": [
+    {
+      "name": "knowledge_reuse_rate",
+      "label": "Knowledge Reuse Rate",
+      "definition": "MEMORY_HIT decisions / all memory_lookup steps",
+      "source": "decision_logs",
+      "sql": "CAST(SUM(CASE WHEN decision = 'MEMORY_HIT' THEN 1 ELSE 0 END) AS REAL) / NULLIF(SUM(CASE WHEN step = 'memory_lookup' THEN 1 ELSE 0 END), 0)",
+      "interpretation": "↑ over time = system depends more on stored knowledge"
+    },
+    {
+      "name": "llm_calls_per_pr",
+      "label": "LLM Calls per PR",
+      "definition": "LLM_GENERATED decisions / PR_CREATED decisions",
+      "source": "decision_logs",
+      "sql": "CAST(SUM(CASE WHEN decision = 'LLM_GENERATED' THEN 1 ELSE 0 END) AS REAL) / NULLIF(SUM(CASE WHEN decision = 'PR_CREATED' THEN 1 ELSE 0 END), 0)",
+      "interpretation": "↓ over time = knowledge replaces LLM calls"
+    },
+    {
+      "name": "merge_rate",
+      "label": "Merge Rate",
+      "definition": "merged truth_events / (merged + closed) truth_events",
+      "source": "truth_events",
+      "sql": "CAST(SUM(CASE WHEN outcome = 'merged' THEN 1 ELSE 0 END) AS REAL) / NULLIF(COUNT(*), 0)",
+      "interpretation": "≥ baseline = quality maintained or improved"
+    },
+    {
+      "name": "pattern_acceptance_rate",
+      "label": "Pattern Acceptance Rate",
+      "definition": "accepted patterns / (accepted + rejected) patterns",
+      "source": "patterns",
+      "sql": "COALESCE(SUM(times_accepted), 0) / NULLIF(SUM(times_accepted + times_rejected), 0)",
+      "interpretation": "↑ = patterns reflect correct fixes"
+    },
+    {
+      "name": "cost_per_accepted_pr",
+      "label": "Cost per Accepted PR",
+      "definition": "total_llm_calls * cost_per_call / merged_prs",
+      "source": "decision_logs + truth_events",
+      "sql": "derived: count(LLM_GENERATED) * 0.03 / count(merged truth_events)",
+      "interpretation": "↓ over time = knowledge reduces operational cost"
+    },
+    {
+      "name": "median_pr_latency_ms",
+      "label": "Median PR Latency (ms)",
+      "definition": "median duration from first decision to PR_CREATED per event",
+      "source": "decision_logs",
+      "sql": "event-level: SUM(duration_ms) per event_id where PR_CREATED exists, then median across events",
+      "interpretation": "↓ or stable = knowledge doesn't slow pipeline"
+    },
+    {
+      "name": "decision_coverage_pct",
+      "label": "Decision Coverage",
+      "definition": "events resolved by knowledge vs total events",
+      "source": "decision_logs",
+      "sql": "COUNT(DISTINCT event_id with MEMORY_HIT) / COUNT(DISTINCT event_id with memory_lookup)",
+      "interpretation": "↑ = more decisions handled without LLM"
+    },
+    {
+      "name": "truth_calibration_count",
+      "label": "Truth Events Collected",
+      "definition": "count of truth_events (merged + closed)",
+      "source": "truth_events",
+      "sql": "COUNT(*)",
+      "interpretation": "absolute count; minimum 50-100 before drawing conclusions"
+    }
+  ],
+  "principles": [
+    "All metrics derive from decision_logs or truth_events — no secondary counters",
+    "Any new metric must be added to this contract before appearing in any dashboard",
+    "v2 changes must reference this contract and note what changed"
+  ]
+}
