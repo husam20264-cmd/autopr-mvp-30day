@@ -202,13 +202,21 @@ async function main() {
     VALUES ('run_counter', 1, 1, datetime('now'))
     ON CONFLICT(metric) DO UPDATE SET current_value = current_value + 1`).run();
   const runNumber = db.prepare(`SELECT current_value FROM truth_calibration WHERE metric = 'run_counter'`).get().current_value;
+
+  // Profile roles:
+  //   baseline:    noise shuffler — mixes 40% non-trivial types to break fixation
+  //   chaos_test:  decorrelation injector — anti-persistence + chaos events
+  //   counter_test:anti-persistence trigger — picks least-used fix type + counterfactuals
+  //   dep_test:    high leverage for minority type (dependency)
+  //   lint_test:   single-type probe (lint)
+  //   mixed_test:  even cycle across all 4 types
   const profiles = [
-    { name: 'baseline',        fixType: 'trivial_bug', chaos: 0.0, counter: false, label: 'trivial_bug only' },
-    { name: 'lint_test',       fixType: 'lint',        chaos: 0.0, counter: false, label: 'lint only' },
-    { name: 'dep_test',        fixType: 'dependency',  chaos: 0.0, counter: false, label: 'dependency only' },
-    { name: 'chaos_test',      fixType: 'trivial_bug', chaos: 0.4, counter: false, label: 'trivial_bug + chaos' },
-    { name: 'counter_test',    fixType: 'trivial_bug', chaos: 0.0, counter: true,  label: 'trivial_bug + counterfactuals' },
-    { name: 'mixed_test',      fixType: 'all',         chaos: 0.0, counter: false, label: 'even mix' },
+    { name: 'baseline',     fixType: 'trivial_bug', shuffle: 0.4, antiPersist: false, chaos: 0.0, counter: false, label: 'noise shuffler (40% non-trivial)' },
+    { name: 'lint_test',    fixType: 'lint',        shuffle: 0.0, antiPersist: false, chaos: 0.0, counter: false, label: 'lint only' },
+    { name: 'dep_test',     fixType: 'dependency',  shuffle: 0.0, antiPersist: false, chaos: 0.0, counter: false, label: 'dependency only' },
+    { name: 'chaos_test',   fixType: 'trivial_bug', shuffle: 0.3, antiPersist: true,  chaos: 0.4, counter: false, label: 'decorrelation + chaos' },
+    { name: 'counter_test', fixType: 'trivial_bug', shuffle: 0.0, antiPersist: true,  chaos: 0.0, counter: true,  label: 'anti-persistence + counterfactuals' },
+    { name: 'mixed_test',   fixType: 'all',         shuffle: 0.0, antiPersist: false, chaos: 0.0, counter: false, label: 'even mix' },
   ];
   const profile = profiles[(runNumber - 1) % profiles.length];
 
@@ -216,34 +224,90 @@ async function main() {
   const interventionId = `run-${runNumber}-${profile.name}`;
   console.log(`  ${dim}  intervention: ${profile.name} (${profile.label})${reset}`);
 
+  // ── Streak-breaking fix-type assigner ──
+  // Anti-persistence: prefers least-used type in recent N events (global history)
+  // Noise shuffle: random type with probability shuffle
+  // Both reduce AR1 autocorrelation and increase effective n
+  const RECENT_MAX = 20;
+  const recentFixTypes = db.prepare(`
+    SELECT fix_type FROM truth_events ORDER BY id DESC LIMIT ${RECENT_MAX}
+  `).all().map(r => r.fix_type).reverse();
+
+  function pickFixType(idx) {
+    if (profile.fixType === 'all') {
+      return FIX_TYPES[idx % FIX_TYPES.length];
+    }
+
+    const roll = Math.random();
+
+    // Noise shuffle: random type from any category
+    if (profile.shuffle > 0 && roll < profile.shuffle) {
+      return FIX_TYPES[Math.floor(Math.random() * FIX_TYPES.length)];
+    }
+
+    // Anti-persistence: bias toward least-represented type in recent history
+    if (profile.antiPersist) {
+      const counts = {};
+      FIX_TYPES.forEach(t => counts[t] = 0);
+      recentFixTypes.slice(-10).forEach(t => counts[t]++);
+      const minCount = Math.min(...Object.values(counts));
+      const candidates = FIX_TYPES.filter(t => counts[t] === minCount);
+      // 20% chance to use profile's target even if it's not the least-used
+      if (candidates.includes(profile.fixType) || Math.random() < 0.2) {
+        return profile.fixType;
+      }
+      return candidates[Math.floor(Math.random() * candidates.length)];
+    }
+
+    return profile.fixType;
+  }
+
+  // Pre-assign fix types to all events with streak breaker
   let truthInjected = 0;
   let chaosEvents = 0;
   const pendingEvents = db.prepare(`SELECT * FROM events WHERE status = 'pending'`).all();
   const eventsToProcess = pendingEvents.slice(0, 15);
 
+  const assignments = [];
   for (let idx = 0; idx < eventsToProcess.length; idx++) {
+    const fixType = pickFixType(idx);
     const event = eventsToProcess[idx];
-    const payload = JSON.parse(event.payload);
-    const repoName = payload.repository?.full_name || 'unknown/repo';
     const isChaos = profile.chaos > 0 && Math.random() < profile.chaos;
     const isCounterfactual = !isChaos && profile.counter && existingRepos.length > 0 && Math.random() < 0.3;
+    assignments.push({ event, fixType, isChaos, isCounterfactual, originalIdx: idx });
+    recentFixTypes.push(fixType);
+    if (recentFixTypes.length > RECENT_MAX) recentFixTypes.shift();
+  }
 
-    // Fix type: single type from profile, or cycled if 'all'
-    const fixType = profile.fixType === 'all'
-      ? FIX_TYPES[idx % FIX_TYPES.length]
-      : profile.fixType;
+  // Reorder to break fix-type streaks (no same type > 2 in a row)
+  const ordered = [];
+  const pool = [...assignments];
+  while (pool.length > 0) {
+    const last = ordered[ordered.length - 1];
+    const different = last
+      ? pool.filter(a => a.fixType !== last.fixType)
+      : pool;
+    const pick = different.length > 0
+      ? (pool.length > 1 ? different : pool)[Math.floor(Math.random() * (different.length > 0 ? different.length : pool.length))]
+      : pool[0];
+    const pi = pool.indexOf(pick);
+    ordered.push(pool.splice(pi, 1)[0]);
+  }
 
-    // Determine outcome based on clean profile
+  // ── Process events in streak-broken order ──
+  for (const { event, fixType, isChaos, isCounterfactual } of ordered) {
+    const payload = JSON.parse(event.payload);
+    const repoName = payload.repository?.full_name || 'unknown/repo';
+
+    // Determine outcome
     let outcome, trustScore, confBase;
 
-    if (profile.name === 'chaos_test' && isChaos) {
-      // Chaos: force rejection independent of confidence
+    if (isChaos) {
       outcome = Math.random() < 0.5 ? 'merged' : 'closed';
       confBase = 0.3 + Math.random() * 0.6;
       trustScore = 0.3 + Math.random() * 0.6;
       chaosEvents++;
-    } else if (profile.name === 'counter_test' && isCounterfactual) {
-      // Counterfactual: opposite of an existing event's outcome
+    } else if (isCounterfactual) {
       const priorRepo = existingRepos[Math.floor(Math.random() * existingRepos.length)];
       const prior = db.prepare(`SELECT outcome, confidence_at_time, trust_score_at_time
         FROM truth_events WHERE repo = ? AND fix_type = ? ORDER BY RANDOM() LIMIT 1`)
@@ -258,7 +322,6 @@ async function main() {
         trustScore = confBase * 0.9;
       }
     } else {
-      // Standard: probabilistic outcome, no chaos
       confBase = patternStats.avg_conf || 0.7;
       outcome = Math.random() < confBase ? 'merged' : 'closed';
       trustScore = confBase * 0.9;
@@ -274,7 +337,7 @@ async function main() {
       outcome === 'merged' ? 'merged' : 'closed'
     );
 
-    // Inject truth event with deliberate variance
+    // Inject truth event
     db.prepare(`INSERT OR REPLACE INTO truth_events (pr_number, repo, event_id, fix_type, outcome, confidence_at_time, trust_score_at_time, diff_preview, observed_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))`).run(
       prNumber, repoName, event.id, fixType, outcome,
@@ -286,7 +349,7 @@ async function main() {
     const repoRec = db.prepare('SELECT split FROM repos WHERE full_name = ?').get(repoName);
     const isEval = repoRec && repoRec.split === 'eval';
     if (isEval) {
-      chaosEvents++; // count eval events as external validation
+      chaosEvents++;
     } else {
       const reconciler = new TruthReconciler();
       await reconciler.reconcile({
